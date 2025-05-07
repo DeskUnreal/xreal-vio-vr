@@ -57,3 +57,7 @@ __pycache__/
 *.bak
 *.bck
 *.tmp
+
+# Ignore runtime-generated, debugging and calibration pose data
+assets/poses/*
+!assets/poses/README.md

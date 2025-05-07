@@ -1,0 +1,24 @@
+# assets/config/headset.yaml
+
+camera:
+  model: "fisheye"
+  resolution: [1280, 720]
+  intrinsics: [fx, fy, cx, cy]
+  distortion_coeffs: [k1, k2, k3, k4]
+  fps: 30
+
+imu:
+  gyro_noise_density: 0.001
+  acc_noise_density: 0.02
+  gyro_bias: [0.0, 0.0, 0.0]
+  acc_bias: [0.0, 0.0, 0.0]
+  sync_offset: 0.0  # seconds
+
+alignment:
+  imu_to_cam_rotation: [1, 0, 0, 0]  # quaternion (w, x, y, z)
+  imu_to_cam_translation: [0.0, 0.0, 0.0]
+
+tracking:
+  ground_calibration_required: true
+  magnetometer_use: true
+  pose_output: "assets/poses/current.pose"
