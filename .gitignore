@@ -61,3 +61,5 @@ __pycache__/
 # Ignore runtime-generated, debugging and calibration pose data
 assets/poses/*
 !assets/poses/README.md
+
+compile_commands.json
