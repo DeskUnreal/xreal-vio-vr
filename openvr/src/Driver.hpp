@@ -9,7 +9,7 @@ namespace XRealAir2UltraDriver {
         // Inherited via IServerTrackedDeviceProvider
         virtual vr::EVRInitError Init(vr::IVRDriverContext* pDriverContext) override;
         virtual void Cleanup() override;
-	virtual const char * const *GetInterfaceVersions() override;
+        virtual const char * const *GetInterfaceVersions() override;
         virtual void RunFrame() override;
         virtual bool ShouldBlockStandbyMode() override;
         virtual void EnterStandby() override;

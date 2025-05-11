@@ -17,8 +17,15 @@ vr::EVRInitError VRDriver::Init(vr::IVRDriverContext* pDriverContext)
 	return vr::VRInitError_None;
 }
 
+const char * const * VRDriver::GetInterfaceVersions()
+{
+    return vr::k_InterfaceVersions;
+}
+
 void VRDriver::Cleanup()
 {
+    delete hmd_device;
+
     VR_CLEANUP_SERVER_DRIVER_CONTEXT();
 }
 
