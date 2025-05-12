@@ -1,13 +1,14 @@
-#include <memory>
-#include <string.h>
 #include <openvr_driver.h>
+#include <string.h>
+
+#include <memory>
 
 #include "Driver.hpp"
 
 static std::shared_ptr<XRealAir2UltraDriver::VRDriver> driver;
 
 VR_INTERFACE
-void *HmdDriverFactory( const char *pInterfaceName, int *pReturnCode )
+void *HmdDriverFactory(const char *pInterfaceName, int *pReturnCode)
 {
 	if (strcmp(vr::IServerTrackedDeviceProvider_Version, pInterfaceName)) {
 		if (pReturnCode)
