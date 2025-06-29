@@ -1,0 +1,70 @@
+From 4d536fadc0b3f8ee4f2149bc0b4e531a1f79d32d Mon Sep 17 00:00:00 2001
+From: heyangHEY <heyang9753124680@163.com>
+Date: Sat, 28 Jun 2025 17:45:25 +0800
+Subject: [PATCH] Added support for Fisheye624 camera model
+
+---
+ src/vit/vit_tracker.cpp        | 19 ++++++++++++++++---
+ thirdparty/vit/vit_interface.h |  2 ++
+ 2 files changed, 18 insertions(+), 3 deletions(-)
+
+diff --git a/src/vit/vit_tracker.cpp b/src/vit/vit_tracker.cpp
+index 644cd8b..79562f2 100644
+--- a/src/vit/vit_tracker.cpp
++++ b/src/vit/vit_tracker.cpp
+@@ -274,6 +274,12 @@ struct Tracker::Implementation {
+       Scalar rpmax = d[8];
+       PinholeRadtan8Camera pinhole_radtan8(mp, rpmax);
+       model.variant = pinhole_radtan8;
++    } else if (cam_calib.model == vit::CameraDistortion::VIT_CAMERA_DISTORTION_FISHEYE624) {
++      ASSERT_(cam_calib.distortion_count == 12);
++      Fisheye624Camera<Scalar>::VecN mp;
++      mp << cam_calib.fx, cam_calib.fy, cam_calib.cx, cam_calib.cy, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8], d[9], d[10], d[11];
++      Fisheye624Camera fisheye624(mp);
++      model.variant = fisheye624;
+     } else {
+       ASSERT(false, "Unsupported camera model (%d)", cam_calib.model);
+     }
+@@ -435,7 +441,13 @@ struct Tracker::Implementation {
+ 
+   void push_frame(const vit::ImgSample *s) {
+     uint32_t i = s->cam_index;
+-    ASSERT(expecting_frame == i, "Expected cam%d frame, received cam%d", expecting_frame, i);
++    // TODO 这个断言很容易被触发，暂时的解决办法是丢弃这一帧
++    // ASSERT(expecting_frame == i, "Expected cam%d frame, received cam%d", expecting_frame, i);
++    if(expecting_frame != i)
++		{
++			std::cout << "Expected cam" << expecting_frame << " frame, received cam" << i << std::endl;
++			return;
++		}
+ 
+     expecting_frame = (expecting_frame + 1) % cam_count;
+ 
+@@ -459,8 +471,9 @@ struct Tracker::Implementation {
+         partial_frame->stats.features_per_cam.resize(cam_count);
+       }
+     } else {
+-      ASSERT(partial_frame->t_ns == s->timestamp, "cam0 and cam%d frame timestamps differ: %ld != %ld", i,
+-             partial_frame->t_ns, s->timestamp);
++      // TODO oak-d-pro-w输出左右同步帧时间戳不等，但偏差小于1ms，暂时忽略不计
++      // ASSERT(partial_frame->t_ns == s->timestamp, "cam0 and cam%d frame timestamps differ: %ld != %ld", i,
++      //        partial_frame->t_ns, s->timestamp);
+     }
+ 
+     // Forced to use uint16_t here, in place because of cameras with 12-bit grayscale support
+diff --git a/thirdparty/vit/vit_interface.h b/thirdparty/vit/vit_interface.h
+index c53e5a1..c44cdea 100644
+--- a/thirdparty/vit/vit_interface.h
++++ b/thirdparty/vit/vit_interface.h
+@@ -93,6 +93,8 @@ typedef enum vit_camera_distortion {
+ 	VIT_CAMERA_DISTORTION_RT8,
+ 	//! Distortion Kannala-Brandt (OpenCV fisheye), 4 parameters.
+ 	VIT_CAMERA_DISTORTION_KB4,
++	//! Distortion Fisheye624, 12 parameters.
++	VIT_CAMERA_DISTORTION_FISHEYE624,
+ } vit_camera_distortion_t;
+ 
+ /*!
+-- 
+2.34.1
+

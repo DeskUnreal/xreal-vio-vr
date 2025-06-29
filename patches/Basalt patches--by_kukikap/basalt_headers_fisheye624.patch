@@ -1,0 +1,1328 @@
+From 0dca9aaef8784196a70f7cbbb4ceb887ebd2e7f3 Mon Sep 17 00:00:00 2001
+From: heyangHEY <heyang9753124680@163.com> kukicap
+Date: Sat, 28 Jun 2025 17:35:21 +0800
+Subject: [PATCH] Added support for Fisheye624 camera model
+
+---
+ include/basalt/camera/fisheye624_camera.hpp   | 666 ++++++++++++++++++
+ include/basalt/camera/generic_camera.hpp      |   3 +-
+ .../serialization/headers_serialization.h     |  26 +
+ python/fisheye624/.gitignore                  |   1 +
+ python/fisheye624/main_jacobians.py           | 461 ++++++++++++
+ test/src/benchmark_camera.cpp                 |   6 +-
+ test/src/test_camera.cpp                      |  25 +
+ 7 files changed, 1186 insertions(+), 2 deletions(-)
+ create mode 100644 include/basalt/camera/fisheye624_camera.hpp
+ create mode 100644 python/fisheye624/.gitignore
+ create mode 100644 python/fisheye624/main_jacobians.py
+
+diff --git a/include/basalt/camera/fisheye624_camera.hpp b/include/basalt/camera/fisheye624_camera.hpp
+new file mode 100644
+index 0000000..dbd8f6e
+--- /dev/null
++++ b/include/basalt/camera/fisheye624_camera.hpp
+@@ -0,0 +1,666 @@
++/**
++BSD 3-Clause License
++
++This file is part of the Basalt project.
++https://gitlab.com/VladyslavUsenko/basalt-headers.git
++
++Original work Copyright (c) 2021-2022, Collabora Ltd.
++Modified work Copyright (c) 2025, yanghe <yanghe215@gmail.com>
++All rights reserved.
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++* Redistributions of source code must retain the above copyright notice, this
++  list of conditions and the following disclaimer.
++
++* Redistributions in binary form must reproduce the above copyright notice,
++  this list of conditions and the following disclaimer in the documentation
++  and/or other materials provided with the distribution.
++
++* Neither the name of the copyright holder nor the names of its
++  contributors may be used to endorse or promote products derived from
++  this software without specific prior written permission.
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
++FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
++SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
++CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
++OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
++OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++@file
++@brief Implementation of fisheye624 camera model
++@author yanghe <yanghe215@gmail.com>
++@note Based on pinhole_radtan8_camera.hpp by Mateo de Mayo <mateo.demayo@collabora.com>
++*/
++
++#pragma once
++
++#include <basalt/camera/camera_static_assert.hpp>
++
++#include <basalt/utils/sophus_utils.hpp>
++
++#define SN1 Scalar{-1}
++#define S0 Scalar{0}
++#define S1 Scalar{1}
++#define S2 Scalar{2}
++#define S3 Scalar{3}
++#define S4 Scalar{4}
++#define S5 Scalar{5}
++#define S6 Scalar{6}
++#define S7 Scalar{7}
++#define S8 Scalar{8}
++#define S10 Scalar{10}
++#define S12 Scalar{12}
++#define S14 Scalar{14}
++#define S16 Scalar{16}
++#define S17 Scalar{17}
++#define S20 Scalar{20}
++#define S25 Scalar{25}
++#define S31 Scalar{31}
++#define S33 Scalar{33}
++#define S35 Scalar{35}
++
++namespace basalt {
++
++using std::abs;
++using std::max;
++using std::sqrt;
++using std::pow;
++
++template <typename Scalar_ = double>
++class Fisheye624Camera {
++ public:
++  using Scalar = Scalar_;
++  // f_x, f_y, c_x, c_y, k1, k2, k3, k4, k5, k6, p1, p2, s1, s2, s3, s4
++  // k1-k6: radial distortion coefficients
++  // p1-p2: tangential distortion coefficients
++  // s1-s4: thin prism distortion coefficients
++  static constexpr int N = 16;  ///< Number of intrinsic parameters.
++
++  using Vec2 = Eigen::Matrix<Scalar, 2, 1>;
++  using Vec3 = Eigen::Matrix<Scalar, 3, 1>;
++  using Vec4 = Eigen::Matrix<Scalar, 4, 1>;
++
++  using VecN = Eigen::Matrix<Scalar, N, 1>;
++
++  using Mat22 = Eigen::Matrix<Scalar, 2, 2>;
++  using Mat24 = Eigen::Matrix<Scalar, 2, 4>;
++  using Mat2N = Eigen::Matrix<Scalar, 2, N>;
++
++  using Mat42 = Eigen::Matrix<Scalar, 4, 2>;
++  using Mat4N = Eigen::Matrix<Scalar, 4, N>;
++
++  Fisheye624Camera() {
++    param_.setZero();
++  }
++
++  explicit Fisheye624Camera(const VecN& p) {
++    param_ = p;
++  }
++
++  template <class Scalar2>
++  Fisheye624Camera<Scalar2> cast() const {
++    return Fisheye624Camera<Scalar2>(param_.template cast<Scalar2>());
++  }
++
++  static std::string getName() { return "fisheye624"; }
++
++  // project function: project 3D points to 2D image plane
++  template <class DerivedPoint3D, class DerivedPoint2D,
++            class DerivedJ3D = std::nullptr_t,
++            class DerivedJparam = std::nullptr_t>
++  inline bool project(const Eigen::MatrixBase<DerivedPoint3D>& p3d,
++                     Eigen::MatrixBase<DerivedPoint2D>& proj,
++                     DerivedJ3D d_proj_d_p3d = nullptr,
++                     DerivedJparam d_proj_d_param = nullptr) const {
++    checkProjectionDerivedTypes<DerivedPoint3D, DerivedPoint2D, DerivedJ3D, DerivedJparam, N>();
++
++    const typename EvalOrReference<DerivedPoint3D>::Type p3d_eval(p3d);
++
++    const Scalar& fx = param_[0];
++    const Scalar& fy = param_[1];
++    const Scalar& cx = param_[2];
++    const Scalar& cy = param_[3];
++    const Scalar& k1 = param_[4];
++    const Scalar& k2 = param_[5];
++    const Scalar& k3 = param_[6];
++    const Scalar& k4 = param_[7];
++    const Scalar& k5 = param_[8];
++    const Scalar& k6 = param_[9];
++    const Scalar& p1 = param_[10];
++    const Scalar& p2 = param_[11];
++    const Scalar& s1 = param_[12];
++    const Scalar& s2 = param_[13];
++    const Scalar& s3 = param_[14];
++    const Scalar& s4 = param_[15];
++
++    const Scalar& x = p3d_eval[0];
++    const Scalar& y = p3d_eval[1];
++    const Scalar& z = p3d_eval[2];
++
++    const Scalar xp = x / z;
++    const Scalar yp = y / z;
++    const Scalar rp2 = xp * xp + yp * yp; // r^2
++    const Scalar rp = std::sqrt(rp2); // r
++    // calculate theta angle
++    const Scalar th = std::atan(rp); // theta, incident light and optical axis angle
++    const Scalar th2 = th * th;
++    // calculate angle and direction
++    const Scalar cos_phi = xp / rp; // cos(phi)
++    const Scalar sin_phi = yp / rp; // sin(phi)
++    // calculate radial distortion polynomial
++    // (th+ k1 * th^3 + k2* th^5 + ...) = th * (1 + k1 * th^2 + k2* th^4 + ...)
++    //                                  = th * (1 + th^2 * (k1 + th^2 * (k2 + ...)))
++    Scalar theta_dist = th * (S1 + th2 * (k1 + th2 * (k2 + th2 * (k3 + th2 * (k4 + th2 * (k5 + th2 * k6))))));
++    // distorted radial coordinate
++    const Scalar xr = theta_dist * cos_phi;
++    const Scalar yr = theta_dist * sin_phi;
++    const Scalar rd2 = xr * xr + yr * yr;
++    // tangential distortion
++    const Scalar dx_tan = (S2 * xr * xr + rd2) * p1 + S2 * xr * yr * p2;
++    const Scalar dy_tan = (S2 * yr * yr + rd2) * p2 + S2 * xr * yr * p1;
++    // thin prism distortion
++    const Scalar dx_prism = s1 * rd2 + s2 * rd2 * rd2;
++    const Scalar dy_prism = s3 * rd2 + s4 * rd2 * rd2;
++    // final distorted coordinate
++    const Scalar xpp = xr + dx_tan + dx_prism;
++    const Scalar ypp = yr + dy_tan + dy_prism;
++    const Scalar u = fx * xpp + cx;
++    const Scalar v = fy * ypp + cy;
++
++    proj[0] = u;
++    proj[1] = v;
++
++    bool positive_z = z >= Sophus::Constants<Scalar>::epsilonSqrt();
++    bool is_valid = positive_z;
++
++    // The following derivative expressions were computed automatically with
++    // sympy, see python/fisheye624/main_jacobians.py.
++    if constexpr (!std::is_same_v<DerivedJ3D, std::nullptr_t>) {
++      BASALT_ASSERT(d_proj_d_p3d);
++
++      d_proj_d_p3d->setZero();
++
++      const Scalar v0 = z*z;
++      const Scalar v1 = x*x;
++      const Scalar v2 = y*y;
++      const Scalar v3 = v1 + v2;
++      const Scalar v4 = v3*S1/v0;
++      const Scalar v5 = std::pow(v4, S3/S2);
++      const Scalar v6 = z*z*z;
++      const Scalar v7 = v5*v6;
++      const Scalar v8 = v0 + v3;
++      const Scalar v9 = v1*v8;
++      const Scalar v10 = S4*v9;
++      const Scalar v11 = std::sqrt(v4);
++      const Scalar v12 = std::atan(v11);
++      const Scalar v13 = v12*v12;
++      const Scalar v14 = k6*v13;
++      const Scalar v15 = k4 + v13*(k5 + v14);
++      const Scalar v16 = k3 + v13*v15;
++      const Scalar v17 = k2 + v13*v16;
++      const Scalar v18 = k1 + v13*v17;
++      const Scalar v19 = v13*v18 + S1;
++      const Scalar v20 = v13*(v19*v19);
++      const Scalar v21 = p2*v20;
++      const Scalar v22 = v21*y;
++      const Scalar v23 = S1/v11;
++      const Scalar v24 = v3*v3*v3;
++      const Scalar v25 = S2*v23*v24*v8*S1/z;
++      const Scalar v26 = v13*(v13*(v13*(v13*(k5 + S2*v14) + v15) + v16) + v17) + v18;
++      const Scalar v27 = v13*v26;
++      const Scalar v28 = S2*v27;
++      const Scalar v29 = v19 + v28;
++      const Scalar v30 = v24*v29;
++      const Scalar v31 = v23*v30;
++      const Scalar v32 = S4*z;
++      const Scalar v33 = v19*v19*v19;
++      const Scalar v34 = v12*v12*v12;
++      const Scalar v35 = s2*v33*v34;
++      const Scalar v36 = v3*v8;
++      const Scalar v37 = v19*y;
++      const Scalar v38 = y*z;
++      const Scalar v39 = S8*v27;
++      const Scalar v40 = v3*v3;
++      const Scalar v41 = v12*v19;
++      const Scalar v42 = v40*v41;
++      const Scalar v43 = v29*v40;
++      const Scalar v44 = v23*v43;
++      const Scalar v45 = s1*v44;
++      const Scalar v46 = v36*v41;
++      const Scalar v47 = S3*v46;
++      const Scalar v48 = S3*v1 + v2;
++      const Scalar v49 = v0*v11;
++      const Scalar v50 = v29*v49;
++      const Scalar v51 = v41*v8;
++      const Scalar v52 = v48*v50 - v48*v51;
++      const Scalar v53 = S2*v41;
++      const Scalar v54 = v53*x;
++      const Scalar v55 = S1/v8;
++      const Scalar v56 = v55*S1/v40;
++      const Scalar v57 = fx*v56;
++      const Scalar v58 = S1/v5*S1/v6;
++      const Scalar v59 = S4*x;
++      const Scalar v60 = p2*v59;
++      const Scalar v61 = v2*v8;
++      const Scalar v62 = v20*v61;
++      const Scalar v63 = S2*v36;
++      const Scalar v64 = v38*x;
++      const Scalar v65 = v11*v41*v64;
++      const Scalar v66 = v29*v3*v64;
++      const Scalar v67 = v19*x;
++      const Scalar v68 = S8*v26*v34*v49;
++      const Scalar v69 = S4*v35;
++      const Scalar v70 = v53*y;
++      const Scalar v71 = z*z*z*z*z*z*z*z*z*z*z*z*z*z*z*z*z;
++      const Scalar v72 = std::pow(v4, S17/S2);
++      const Scalar v73 = v71*v72;
++      const Scalar v74 = v28*v73;
++      const Scalar v75 = v29*v41*(v3*v3*v3*v3*v3*v3*v3*v3);
++      const Scalar v76 = -v0*v5*v51 + v11*v46 + v43;
++      const Scalar v77 = v76*(v3*v3*v3*v3*v3*v3*v3);
++      const Scalar v78 = v53*v76*(v3*v3*v3*v3*v3*v3);
++      const Scalar v79 = v55*S1/v71*S1/v72;
++      const Scalar v80 = p1*y;
++      const Scalar v81 = v20*v80;
++      const Scalar v82 = S4*s4*v33*v34;
++      const Scalar v83 = s3*v44;
++      const Scalar v84 = v1 + S3*v2;
++      const Scalar v85 = v50*v84 - v51*v84;
++      const Scalar v86 = fy*v56;
++      const Scalar v87 = p1*x;
++
++      const Scalar du_dx = v57*v58*(v1*v31 - v10*v22*v7 + v22*v25 + v30*v32*v35*x + v42*(p2*v1*v32*v37 + p2*v1*v38*v39 + v36 - v9) + v54*v7*(p1*(v47 + v52) + v45));
++      const Scalar du_dy = v57*(p2*v2*v67*v68 + v21*v63*x + v44*v69*y - v60*v62 + v65*(4*p2*v19*y*z - v8) + v66 + v70*(p1*(v46 + v52) + v45));
++      const Scalar du_dz = -fx*v79*(v60*v75*y + v67*v73 + v69*v77 + v74*x + v78*(p1*v48 + s1*v3));
++      const Scalar dv_dx = v86*(p1*v1*v37*v68 - v10*v81 + v44*v82*x + v54*(p2*(v46 + v85) + v83) + v63*v81 + v65*(4*p1*v19*x*z - v8) + v66);
++      const Scalar dv_dy = v58*v86*(-p1*v59*v62*v7 + v2*v31 + v20*v25*v87 + v30*v38*v82 + v42*(p1*v2*v32*v67 + v2*v39*v87*z + v36 - v61) + v7*v70*(p2*(v47 + v85) + v83));
++      const Scalar dv_dz = -fy*v79*(v37*v73 + v59*v75*v80 + v74*y + v77*v82 + v78*(p2*v84 + s3*v3));  
++
++      (*d_proj_d_p3d)(0, 0) = du_dx;
++      (*d_proj_d_p3d)(0, 1) = du_dy;
++      (*d_proj_d_p3d)(0, 2) = du_dz;
++      (*d_proj_d_p3d)(1, 0) = dv_dx;
++      (*d_proj_d_p3d)(1, 1) = dv_dy;
++      (*d_proj_d_p3d)(1, 2) = dv_dz;
++    } else {
++      UNUSED(d_proj_d_p3d);
++    }
++
++    if constexpr (!std::is_same_v<DerivedJparam, std::nullptr_t>) {
++      BASALT_ASSERT(d_proj_d_param);
++      d_proj_d_param->setZero();
++
++      const Scalar w0 = x*x;
++      const Scalar w1 = y*y;
++      const Scalar w2 = w0 + w1;
++      const Scalar w3 = std::sqrt(w2*S1/(z*z));
++      const Scalar w4 = w3*z;
++      const Scalar w5 = w4*x;
++      const Scalar w6 = std::atan(w3);
++      const Scalar w7 = w6*w6;
++      const Scalar w8 = w7*(k1 + w7*(k2 + w7*(k3 + w7*(k4 + w7*(k5 + k6*w7))))) + S1;
++      const Scalar w9 = w6*w6*w6;
++      const Scalar w10 = w2*w9*(w8*w8*w8);
++      const Scalar w11 = s2*w10;
++      const Scalar w12 = S2*x*y;
++      const Scalar w13 = S3*w0 + w1;
++      const Scalar w14 = w6*w8;
++      const Scalar w15 = w14*(p1*w13 + p2*w12 + s1*w2);
++      const Scalar w16 = S1/w2;
++      const Scalar w17 = w14*w16;
++      const Scalar w18 = w16*w9;
++      const Scalar w19 = fx*(S4*w11 + S2*w15 + w5);
++      const Scalar w20 = w6*w6*w6*w6*w6;
++      const Scalar w21 = w16*w19;
++      const Scalar w22 = w6*w6*w6*w6*w6*w6*w6;
++      const Scalar w23 = w6*w6*w6*w6*w6*w6*w6*w6*w6;
++      const Scalar w24 = w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6;
++      const Scalar w25 = w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6;
++      const Scalar w26 = w7*(w8*w8);
++      const Scalar w27 = fx*w26;
++      const Scalar w28 = w16*w27;
++      const Scalar w29 = (w6*w6*w6*w6)*(w8*w8*w8*w8);
++      const Scalar w30 = w4*y;
++      const Scalar w31 = s4*w10;
++      const Scalar w32 = w0 + S3*w1;
++      const Scalar w33 = w14*(p1*w12 + p2*w32 + s3*w2);
++      const Scalar w34 = fy*(w30 + S4*w31 + S2*w33);
++      const Scalar w35 = w16*w34;
++      const Scalar w36 = fy*w26;
++      const Scalar w37 = w16*w36;
++
++      const Scalar du_fx = w17*(w11 + w15 + w5);
++      const Scalar du_fy = S0;
++      const Scalar du_cx = S1;
++      const Scalar du_cy = S0;
++      const Scalar du_k1 = w18*w19;
++      const Scalar du_k2 = w20*w21;
++      const Scalar du_k3 = w21*w22;
++      const Scalar du_k4 = w21*w23;
++      const Scalar du_k5 = w21*w24;
++      const Scalar du_k6 = w21*w25;
++      const Scalar du_p1 = w13*w28;
++      const Scalar du_p2 = w12*w28;
++      const Scalar du_s1 = w27;
++      const Scalar du_s2 = fx*w29;
++      const Scalar du_s3 = S0;
++      const Scalar du_s4 = S0;
++      const Scalar dv_fx = S0;
++      const Scalar dv_fy = w17*(w30 + w31 + w33);
++      const Scalar dv_cx = S0;
++      const Scalar dv_cy = S1;
++      const Scalar dv_k1 = w18*w34;
++      const Scalar dv_k2 = w20*w35;
++      const Scalar dv_k3 = w22*w35;
++      const Scalar dv_k4 = w23*w35;
++      const Scalar dv_k5 = w24*w35;
++      const Scalar dv_k6 = w25*w35;
++      const Scalar dv_p1 = w12*w37;
++      const Scalar dv_p2 = w32*w37;
++      const Scalar dv_s1 = S0;
++      const Scalar dv_s2 = S0;
++      const Scalar dv_s3 = w36;
++      const Scalar dv_s4 = fy*w29;
++
++      (*d_proj_d_param)(0, 0) = du_fx;
++      (*d_proj_d_param)(0, 1) = du_fy;
++      (*d_proj_d_param)(0, 2) = du_cx;
++      (*d_proj_d_param)(0, 3) = du_cy;
++      (*d_proj_d_param)(0, 4) = du_k1;
++      (*d_proj_d_param)(0, 5) = du_k2;
++      (*d_proj_d_param)(0, 6) = du_k3;
++      (*d_proj_d_param)(0, 7) = du_k4;
++      (*d_proj_d_param)(0, 8) = du_k5;
++      (*d_proj_d_param)(0, 9) = du_k6;
++      (*d_proj_d_param)(0, 10) = du_p1;
++      (*d_proj_d_param)(0, 11) = du_p2;
++      (*d_proj_d_param)(0, 12) = du_s1;
++      (*d_proj_d_param)(0, 13) = du_s2;
++      (*d_proj_d_param)(0, 14) = du_s3;
++      (*d_proj_d_param)(0, 15) = du_s4;
++
++      (*d_proj_d_param)(1, 0) = dv_fx;
++      (*d_proj_d_param)(1, 1) = dv_fy;
++      (*d_proj_d_param)(1, 2) = dv_cx;
++      (*d_proj_d_param)(1, 3) = dv_cy;
++      (*d_proj_d_param)(1, 4) = dv_k1;
++      (*d_proj_d_param)(1, 5) = dv_k2;
++      (*d_proj_d_param)(1, 6) = dv_k3;
++      (*d_proj_d_param)(1, 7) = dv_k4;
++      (*d_proj_d_param)(1, 8) = dv_k5;
++      (*d_proj_d_param)(1, 9) = dv_k6;
++      (*d_proj_d_param)(1, 10) = dv_p1;
++      (*d_proj_d_param)(1, 11) = dv_p2;
++      (*d_proj_d_param)(1, 12) = dv_s1;
++      (*d_proj_d_param)(1, 13) = dv_s2;
++      (*d_proj_d_param)(1, 14) = dv_s3;
++      (*d_proj_d_param)(1, 15) = dv_s4;
++    } else {
++      UNUSED(d_proj_d_param);
++    }
++
++    return is_valid;
++  }
++
++  // distortion function
++  template <class DerivedJundist = std::nullptr_t>
++  inline void distort(const Vec2& undist, Vec2& dist, DerivedJundist d_dist_d_undist = nullptr) const {
++    const Scalar& k1 = param_[4];
++    const Scalar& k2 = param_[5];
++    const Scalar& k3 = param_[6];
++    const Scalar& k4 = param_[7];
++    const Scalar& k5 = param_[8];
++    const Scalar& k6 = param_[9];
++    const Scalar& p1 = param_[10];
++    const Scalar& p2 = param_[11];
++    const Scalar& s1 = param_[12];
++    const Scalar& s2 = param_[13];
++    const Scalar& s3 = param_[14];
++    const Scalar& s4 = param_[15];
++
++    const Scalar xp = undist.x();
++    const Scalar yp = undist.y();
++    const Scalar rp2 = xp * xp + yp * yp; // r^2
++    const Scalar rp = std::sqrt(rp2); // r
++    // calculate theta angle
++    const Scalar th = std::atan(rp); // theta, incident light and optical axis angle
++    const Scalar th2 = th * th;
++    // calculate angle and direction
++    const Scalar cos_phi = xp / rp; // cos(phi)
++    const Scalar sin_phi = yp / rp; // sin(phi)
++    // calculate radial distortion polynomial
++    // (th+ k1 * th^3 + k2* th^5 + ...) = th * (1 + k1 * th^2 + k2* th^4 + ...)
++    //                                  = th * (1 + th^2 * (k1 + th^2 * (k2 + ...)))
++    Scalar theta_dist = th * (S1 + th2 * (k1 + th2 * (k2 + th2 * (k3 + th2 * (k4 + th2 * (k5 + th2 * k6))))));
++    // distorted radial coordinate
++    const Scalar xr = theta_dist * cos_phi;
++    const Scalar yr = theta_dist * sin_phi;
++    const Scalar rd2 = xr * xr + yr * yr;
++    // tangential distortion
++    const Scalar dx_tan = (S2 * xr * xr + rd2) * p1 + S2 * xr * yr * p2;
++    const Scalar dy_tan = (S2 * yr * yr + rd2) * p2 + S2 * xr * yr * p1;
++    // thin prism distortion
++    const Scalar dx_prism = s1 * rd2 + s2 * rd2 * rd2;
++    const Scalar dy_prism = s3 * rd2 + s4 * rd2 * rd2;
++    // final distorted coordinate
++    const Scalar xpp = xr + dx_tan + dx_prism;
++    const Scalar ypp = yr + dy_tan + dy_prism;
++    dist.x() = xpp;
++    dist.y() = ypp;
++
++    // The following derivative expressions were computed automatically with
++    // sympy, see python/fisheye624/main_jacobians.py.
++    if constexpr (!std::is_same_v<DerivedJundist, std::nullptr_t>) {
++      BASALT_ASSERT(d_dist_d_undist);
++      
++      d_dist_d_undist->setZero();
++
++      const Scalar v0 = xp*xp;
++      const Scalar v1 = yp*yp;
++      const Scalar v2 = v0 + v1;
++      const Scalar v3 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++      const Scalar v4 = std::atan(std::sqrt(v2));
++      const Scalar v5 = v4*v4;
++      const Scalar v6 = k6*v5;
++      const Scalar v7 = k4 + v5*(k5 + v6);
++      const Scalar v8 = k3 + v5*v7;
++      const Scalar v9 = k2 + v5*v8;
++      const Scalar v10 = k1 + v5*v9;
++      const Scalar v11 = v10*v5 + S1;
++      const Scalar v12 = v2 + S1;
++      const Scalar v13 = v12*v4;
++      const Scalar v14 = v11*v13;
++      const Scalar v15 = v14*v3;
++      const Scalar v16 = v0*v11;
++      const Scalar v17 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++      const Scalar v18 = v13*v17;
++      const Scalar v19 = std::pow(v2, S33/S2);
++      const Scalar v20 = S2*yp;
++      const Scalar v21 = v12*v5*(v11*v11);
++      const Scalar v22 = p2*v21;
++      const Scalar v23 = std::pow(v2, S31/S2);
++      const Scalar v24 = S4*yp;
++      const Scalar v25 = v23*v24;
++      const Scalar v26 = v5*(v10 + v5*(v5*(v5*(v5*(k5 + S2*v6) + v7) + v8) + v9));
++      const Scalar v27 = S2*v26;
++      const Scalar v28 = v11 + v27;
++      const Scalar v29 = v19*v28;
++      const Scalar v30 = v17*v28;
++      const Scalar v31 = p2*v4;
++      const Scalar v32 = S4*xp;
++      const Scalar v33 = v1*v11;
++      const Scalar v34 = v1*v27 + v33;
++      const Scalar v35 = v0*v27 + v16;
++      const Scalar v36 = v34 + v35;
++      const Scalar v37 = v11*v11*v11;
++      const Scalar v38 = v4*v4*v4;
++      const Scalar v39 = s2*v36*v37*v38;
++      const Scalar v40 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++      const Scalar v41 = v2*v2*v2;
++      const Scalar v42 = v36*v41;
++      const Scalar v43 = s1*v42;
++      const Scalar v44 = v14*std::pow(v2, S7/S2);
++      const Scalar v45 = S3*v44;
++      const Scalar v46 = S3*v0;
++      const Scalar v47 = S6*v26;
++      const Scalar v48 = v14*std::pow(v2, S5/S2);
++      const Scalar v49 = v41*(v0*v47 + v11*v46 + v34) - v48*(v1 + v46);
++      const Scalar v50 = S2*xp;
++      const Scalar v51 = v11*v4;
++      const Scalar v52 = v50*v51;
++      const Scalar v53 = S1/v12;
++      const Scalar v54 = v53/std::pow(v2, S35/S2);
++      const Scalar v55 = std::pow(v2, S25/S2);
++      const Scalar v56 = v20*v51;
++      const Scalar v57 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++      const Scalar v58 = v23*v32;
++      const Scalar v59 = xp*yp;
++      const Scalar v60 = -v14*v23*v59 + v30*v59;
++      const Scalar v61 = v53*S1/v3;
++      const Scalar v62 = s3*v42;
++      const Scalar v63 = v41*(v1*v47 + S3*v33 + v35) - v48*(v0 + S3*v1);
++      const Scalar v64 = p1*v21;
++      const Scalar v65 = s4*v36*v37*v38;
++      const Scalar v66 = p1*v4;
++
++      const Scalar dxpp_dxp = v54*(-v0*v22*v25 + v0*v29 + v15 - v16*v18 + v16*v24*v30*v31 + v17*v32*v39 + v19*v20*v22 + v40*v52*(p1*(v45 + v49) + v43));
++      const Scalar dxpp_dyp = v61*(-v1*v22*v32*v57 + v17*v22*v50 + v25*v39 + v28*v31*v33*v58 + v55*v56*(p1*(v44 + v49) + v43) + v60);
++      const Scalar dypp_dxp = v61*(-v0*v24*v57*v64 + v16*v25*v28*v66 + v17*v20*v64 + v52*v55*(p2*(v44 + v63) + v62) + v58*v65 + v60);
++      const Scalar dypp_dyp = v54*(v1*v29 - v1*v58*v64 + v15 + v17*v24*v65 - v18*v33 + v19*v50*v64 + v30*v32*v33*v66 + v40*v56*(p2*(v45 + v63) + v62));
++
++      (*d_dist_d_undist)(0, 0) = dxpp_dxp;
++      (*d_dist_d_undist)(0, 1) = dxpp_dyp;
++      (*d_dist_d_undist)(1, 0) = dypp_dxp;
++      (*d_dist_d_undist)(1, 1) = dypp_dyp;
++    } else {
++      UNUSED(d_dist_d_undist);
++    }
++  }
++
++  // back-project function: back-project 2D image points to 3D space
++  template <class DerivedPoint2D, class DerivedPoint3D,
++            class DerivedJ2D = std::nullptr_t,
++            class DerivedJparam = std::nullptr_t>
++  inline bool unproject(const Eigen::MatrixBase<DerivedPoint2D>& proj,
++                       Eigen::MatrixBase<DerivedPoint3D>& p3d,
++                       DerivedJ2D d_p3d_d_proj = nullptr,
++                       DerivedJparam d_p3d_d_param = nullptr) const {
++    checkUnprojectionDerivedTypes<DerivedPoint2D, DerivedPoint3D, DerivedJ2D, DerivedJparam, N>();
++    const typename EvalOrReference<DerivedPoint2D>::Type proj_eval(proj);
++
++    const Scalar& fx = param_[0];
++    const Scalar& fy = param_[1];
++    const Scalar& cx = param_[2];
++    const Scalar& cy = param_[3];
++
++    const Scalar& u = proj_eval[0];
++    const Scalar& v = proj_eval[1];
++
++    const Scalar x0 = (u - cx) / fx;
++    const Scalar y0 = (v - cy) / fy;
++
++    // Newton solver
++    Vec2 dist{x0, y0};
++    Vec2 undist{dist};
++    const Scalar EPS = Sophus::Constants<Scalar>::epsilonSqrt();
++    constexpr int N = 5;  // Max iterations
++    for (int i = 0; i < N; i++) {
++      Mat22 J{};
++      Vec2 fundist{};
++      distort(undist, fundist, &J);
++      Vec2 residual = fundist - dist;
++      undist -= J.inverse() * residual;
++      if (residual.norm() < EPS) {
++        break;
++      }
++    }
++    const Scalar xp = undist.x();
++    const Scalar yp = undist.y();
++
++    const Scalar norm_inv = S1 / sqrt(xp * xp + yp * yp + S1);
++    p3d.setZero();
++    p3d[0] = xp * norm_inv;
++    p3d[1] = yp * norm_inv;
++    p3d[2] = norm_inv;
++
++    if constexpr (!std::is_same_v<DerivedJ2D, std::nullptr_t> || !std::is_same_v<DerivedJparam, std::nullptr_t>) {
++      BASALT_ASSERT(false);  // Not implemented
++      // If this gets implemented update: docs, benchmarks and tests
++    }
++    UNUSED(d_p3d_d_proj);
++    UNUSED(d_p3d_d_param);
++
++    return true;
++  }
++
++  // set camera parameters from initial parameters
++  inline void setFromInit(const Vec4& init) {
++    param_.setZero();
++    param_[0] = init[0];  // fx
++    param_[1] = init[1];  // fy
++    param_[2] = init[2];  // cx
++    param_[3] = init[3];  // cy
++  }
++
++  void operator+=(const VecN& inc) {
++    param_ += inc;
++  }
++
++  const VecN& getParam() const { return param_; }
++
++  // get test projections
++  static Eigen::aligned_vector<Fisheye624Camera> getTestProjections() {
++    Eigen::aligned_vector<Fisheye624Camera> res;
++
++    VecN vec1{};
++    vec1 << 240.36779879414573, 240.5451927941997, 229.28806727360566, 323.9058136019867, 
++    0.004942310516784331, 0.08084492696144324, -0.10826720347293965, 0.06150918216264536, -0.017759399377547933, 0.0020808766903717643, 
++    -0.004709985372567348, 0.001555920994055065, 
++    0.012193753617982993, 0.0008591524588070316, -0.002576959707715772, -0.00013922169492969037;
++    res.emplace_back(vec1);
++
++    return res;
++  }
++
++  // get test resolutions
++  static Eigen::aligned_vector<Eigen::Vector2i> getTestResolutions() {
++    Eigen::aligned_vector<Eigen::Vector2i> res;
++    res.emplace_back(480, 640);
++    return res;
++  }
++
++  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
++
++ private:
++  VecN param_;
++};
++
++}  // namespace basalt 
++
++#undef SN1
++#undef S0
++#undef S1
++#undef S2
++#undef S3
++#undef S4
++#undef S5
++#undef S6
++#undef S7
++#undef S8
++#undef S10
++#undef S12
++#undef S14
++#undef S16
++#undef S17
++#undef S20
++#undef S25
++#undef S31
++#undef S33
++#undef S35
+diff --git a/include/basalt/camera/generic_camera.hpp b/include/basalt/camera/generic_camera.hpp
+index 5619e1d..452fbb0 100644
+--- a/include/basalt/camera/generic_camera.hpp
++++ b/include/basalt/camera/generic_camera.hpp
+@@ -45,6 +45,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <basalt/camera/kannala_brandt_camera4.hpp>
+ #include <basalt/camera/pinhole_camera.hpp>
+ #include <basalt/camera/pinhole_radtan8_camera.hpp>
++#include <basalt/camera/fisheye624_camera.hpp>
+ #include <basalt/camera/unified_camera.hpp>
+ 
+ #include <variant>
+@@ -72,7 +73,7 @@ class GenericCamera {
+ 
+   /// Possible variants of camera models.
+   using VariantT = std::variant<ExtendedUnifiedCamera<Scalar>, DoubleSphereCamera<Scalar>, KannalaBrandtCamera4<Scalar>,
+-                                UnifiedCamera<Scalar>, PinholeCamera<Scalar>, PinholeRadtan8Camera<Scalar>>;
++                                UnifiedCamera<Scalar>, PinholeCamera<Scalar>, PinholeRadtan8Camera<Scalar>, Fisheye624Camera<Scalar>>;
+ 
+  public:
+   /// @brief Cast to different scalar type
+diff --git a/include/basalt/serialization/headers_serialization.h b/include/basalt/serialization/headers_serialization.h
+index 2f069dd..d089eb5 100644
+--- a/include/basalt/serialization/headers_serialization.h
++++ b/include/basalt/serialization/headers_serialization.h
+@@ -165,6 +165,32 @@ inline void load(Archive& ar, basalt::PinholeRadtan8Camera<Scalar>& cam) {
+   cam = basalt::PinholeRadtan8Camera<Scalar>(intr, rpmax);
+ }
+ 
++template <class Archive, class Scalar>
++inline void save(Archive& ar, const basalt::Fisheye624Camera<Scalar>& cam) {
++  ar(cereal::make_nvp("fx", cam.getParam()[0]), cereal::make_nvp("fy", cam.getParam()[1]),
++     cereal::make_nvp("cx", cam.getParam()[2]), cereal::make_nvp("cy", cam.getParam()[3]),
++     cereal::make_nvp("k1", cam.getParam()[4]), cereal::make_nvp("k2", cam.getParam()[5]),
++     cereal::make_nvp("k3", cam.getParam()[6]), cereal::make_nvp("k4", cam.getParam()[7]),
++     cereal::make_nvp("k5", cam.getParam()[8]), cereal::make_nvp("k6", cam.getParam()[9]),
++     cereal::make_nvp("p1", cam.getParam()[10]), cereal::make_nvp("p2", cam.getParam()[11]),
++     cereal::make_nvp("s1", cam.getParam()[12]), cereal::make_nvp("s2", cam.getParam()[13]),
++     cereal::make_nvp("s3", cam.getParam()[14]), cereal::make_nvp("s4", cam.getParam()[15]));
++}
++
++template <class Archive, class Scalar>
++inline void load(Archive& ar, basalt::Fisheye624Camera<Scalar>& cam) {
++  Eigen::Matrix<Scalar, 16, 1> intr;
++
++  ar(cereal::make_nvp("fx", intr[0]), cereal::make_nvp("fy", intr[1]), cereal::make_nvp("cx", intr[2]),
++     cereal::make_nvp("cy", intr[3]), cereal::make_nvp("k1", intr[4]), cereal::make_nvp("k2", intr[5]),
++     cereal::make_nvp("k3", intr[6]), cereal::make_nvp("k4", intr[7]), cereal::make_nvp("k5", intr[8]),
++     cereal::make_nvp("k6", intr[9]), cereal::make_nvp("p1", intr[10]), cereal::make_nvp("p2", intr[11]),
++     cereal::make_nvp("s1", intr[12]), cereal::make_nvp("s2", intr[13]), cereal::make_nvp("s3", intr[14]),
++     cereal::make_nvp("s4", intr[15]));
++
++  cam = basalt::Fisheye624Camera<Scalar>(intr);
++}
++
+ template <class Archive, class Scalar>
+ inline void save(Archive& ar, const basalt::DoubleSphereCamera<Scalar>& cam) {
+   ar(cereal::make_nvp("fx", cam.getParam()[0]), cereal::make_nvp("fy", cam.getParam()[1]),
+diff --git a/python/fisheye624/.gitignore b/python/fisheye624/.gitignore
+new file mode 100644
+index 0000000..c18dd8d
+--- /dev/null
++++ b/python/fisheye624/.gitignore
+@@ -0,0 +1 @@
++__pycache__/
+diff --git a/python/fisheye624/main_jacobians.py b/python/fisheye624/main_jacobians.py
+new file mode 100644
+index 0000000..494b2e8
+--- /dev/null
++++ b/python/fisheye624/main_jacobians.py
+@@ -0,0 +1,461 @@
++#
++# BSD 3-Clause License
++#
++# This file is part of the Basalt project.
++# https://gitlab.com/VladyslavUsenko/basalt.git
++#
++# Copyright (c) 2022, Collabora Ltd.
++# All rights reserved.
++#
++# Author: Mateo de Mayo <mateo.demayo@collabora.com>
++#
++# Modified for fisheye624 camera model by:
++# Copyright (c) 2025, yanghe <yanghe215@gmail.com>
++# 
++
++"""
++Computes jacobian expressions for the fisheye624 camera model.
++"""
++from itertools import count
++from sympy import symbols, diff, simplify, cse, sqrt, atan
++from sympy.printing import cxxcode
++from sympy.codegen.rewriting import create_expand_pow_optimization
++
++fx, fy, cx, cy, k1, k2, k3, k4, k5, k6, p1, p2, s1, s2, s3, s4 = symbols(
++    "fx fy cx cy k1 k2 k3 k4 k5 k6 p1 p2 s1 s2 s3 s4"
++)
++
++
++def distort_symbolic(xp, yp):
++    # compute r^2 and r
++    rp2 = xp * xp + yp * yp
++    rp = sqrt(rp2)
++    
++    # compute theta angle
++    th = atan(rp)
++    th2 = th * th
++    
++    # compute cos_phi and sin_phi
++    cos_phi = xp / rp
++    sin_phi = yp / rp
++    
++    # compute radial distortion polynomial
++    theta_dist = th * (1 + th2 * (k1 + th2 * (k2 + th2 * (k3 + th2 * (k4 + th2 * (k5 + th2 * k6))))))
++    
++    # compute distorted coordinates
++    xr = theta_dist * cos_phi
++    yr = theta_dist * sin_phi
++    rd2 = xr * xr + yr * yr
++    
++    # compute tangential distortion
++    dx_tan = (2 * xr * xr + rd2) * p1 + 2 * xr * yr * p2
++    dy_tan = (2 * yr * yr + rd2) * p2 + 2 * xr * yr * p1
++    
++    # compute prism distortion
++    dx_prism = s1 * rd2 + s2 * rd2 * rd2
++    dy_prism = s3 * rd2 + s4 * rd2 * rd2
++    
++    # compute final distorted coordinates
++    xpp = xr + dx_tan + dx_prism
++    ypp = yr + dy_tan + dy_prism
++    
++    return xpp, ypp
++
++
++def project_symbolic(x, y, z):
++    # compute normalized coordinates
++    xp = x / z
++    yp = y / z
++    
++    # apply distortion
++    xpp, ypp = distort_symbolic(xp, yp)
++    
++    # apply intrinsics
++    u = fx * xpp + cx
++    v = fy * ypp + cy
++    
++    return u, v
++
++
++def cse_as_cxx(cse_tuple, expr_names):
++    expand_pow = create_expand_pow_optimization(20) # create_expand_pow_optimization() create a optimization function for expanding power operations
++    betterformat = lambda e: cxxcode(expand_pow(e)) # convert expression to C++ code
++
++    subexprs, rhss = cse_tuple # convert expression to C++ code
++
++    res = ""
++    for var, expr in subexprs:
++        res += f"const Scalar {var} = {betterformat(expr)};\n"
++    res += "\n"
++
++    for lhs, rhs in zip(expr_names, rhss):
++        res += f"const Scalar {lhs} = {betterformat(rhs)};\n"
++
++    return res
++
++
++def distort_jacobian_to_xpyp():
++    # Requires uncommenting line above for xp, yp
++    var_names = (symbols(f"v{i}") for i in count())
++    xp, yp = symbols("xp yp")
++    xpp, ypp = distort_symbolic(xp, yp)
++
++    dxpp_dxp = simplify(diff(xpp, xp))
++    dxpp_dyp = simplify(diff(xpp, yp))
++    dypp_dxp = simplify(diff(ypp, xp))
++    dypp_dyp = simplify(diff(ypp, yp))
++    cse_tuple = cse([dxpp_dxp, dxpp_dyp, dypp_dxp, dypp_dyp], var_names)
++    names = ["dxpp_dxp", "dxpp_dyp", "dypp_dxp", "dypp_dyp"]
++    return cse_tuple, names
++
++
++def project_jacobian_to_3dpoint():
++    var_names = (symbols(f"v{i}") for i in count())
++    x, y, z = symbols("x y z")
++    u, v = project_symbolic(x, y, z)
++
++    du_dx = simplify(diff(u, x))
++    du_dy = simplify(diff(u, y))
++    du_dz = simplify(diff(u, z))
++    dv_dx = simplify(diff(v, x))
++    dv_dy = simplify(diff(v, y))
++    dv_dz = simplify(diff(v, z))
++    cse_tuple = cse([du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz], var_names)
++    names = ["du_dx", "du_dy", "du_dz", "dv_dx", "dv_dy", "dv_dz"]
++    return cse_tuple, names
++
++
++def project_jacobian_to_intrinsics():
++    var_names = (symbols(f"w{i}") for i in count())
++    x, y, z = symbols("x y z")
++    u, v = project_symbolic(x, y, z)
++
++    du_fx = simplify(diff(u, fx))
++    du_fy = simplify(diff(u, fy))
++    du_cx = simplify(diff(u, cx))
++    du_cy = simplify(diff(u, cy))
++    du_k1 = simplify(diff(u, k1))
++    du_k2 = simplify(diff(u, k2))
++    du_k3 = simplify(diff(u, k3))
++    du_k4 = simplify(diff(u, k4))
++    du_k5 = simplify(diff(u, k5))
++    du_k6 = simplify(diff(u, k6))
++    du_p1 = simplify(diff(u, p1))
++    du_p2 = simplify(diff(u, p2))
++    du_s1 = simplify(diff(u, s1))
++    du_s2 = simplify(diff(u, s2))
++    du_s3 = simplify(diff(u, s3))
++    du_s4 = simplify(diff(u, s4))
++
++    dv_fx = simplify(diff(v, fx))
++    dv_fy = simplify(diff(v, fy))
++    dv_cx = simplify(diff(v, cx))
++    dv_cy = simplify(diff(v, cy))
++    dv_k1 = simplify(diff(v, k1))
++    dv_k2 = simplify(diff(v, k2))
++    dv_k3 = simplify(diff(v, k3))
++    dv_k4 = simplify(diff(v, k4))
++    dv_k5 = simplify(diff(v, k5))
++    dv_k6 = simplify(diff(v, k6))
++    dv_p1 = simplify(diff(v, p1))
++    dv_p2 = simplify(diff(v, p2))
++    dv_s1 = simplify(diff(v, s1))
++    dv_s2 = simplify(diff(v, s2))
++    dv_s3 = simplify(diff(v, s3))
++    dv_s4 = simplify(diff(v, s4))
++
++    # fmt:off
++    cse_tuple = cse(
++        [
++            du_fx, du_fy, du_cx, du_cy, du_k1, du_k2, du_k3, du_k4, du_k5, du_k6,
++            du_p1, du_p2, du_s1, du_s2, du_s3, du_s4,
++            dv_fx, dv_fy, dv_cx, dv_cy, dv_k1, dv_k2, dv_k3, dv_k4, dv_k5, dv_k6,
++            dv_p1, dv_p2, dv_s1, dv_s2, dv_s3, dv_s4,
++        ],
++        var_names
++    )
++    names = [
++        "du_fx", "du_fy", "du_cx", "du_cy", "du_k1", "du_k2", "du_k3", "du_k4", "du_k5", "du_k6",
++        "du_p1", "du_p2", "du_s1", "du_s2", "du_s3", "du_s4",
++        "dv_fx", "dv_fy", "dv_cx", "dv_cy", "dv_k1", "dv_k2", "dv_k3", "dv_k4", "dv_k5", "dv_k6",
++        "dv_p1", "dv_p2", "dv_s1", "dv_s2", "dv_s3", "dv_s4",
++    ]
++    # fmt:on
++
++    return cse_tuple, names
++
++
++def main():
++    print("[Project jacobians of 2D point w.r.t 3D point]")
++    res = project_jacobian_to_3dpoint()
++    print(cse_as_cxx(*res))
++
++    print("[Project jacobians of 2D point w.r.t intrinsics]")
++    res = project_jacobian_to_intrinsics()
++    print(cse_as_cxx(*res))
++
++    print("[Distort jacobians of distorted 2D point from undistorted 2D point]")
++    res = distort_jacobian_to_xpyp()
++    print(cse_as_cxx(*res))
++
++    print("[Unproject jacobians of 3D point w.r.t 2D point]")
++    print("Not implemented yet")
++
++    print("[Unproject jacobians of 3D point w.r.t intrinsics]")
++    print("Not implemented yet")
++
++
++if __name__ == "__main__":
++    main()
++
++
++'''
++[Project jacobians of 2D point w.r.t 3D point]
++const Scalar v0 = z*z;
++const Scalar v1 = x*x;
++const Scalar v2 = y*y;
++const Scalar v3 = v1 + v2;
++const Scalar v4 = v3*1.0/v0;
++const Scalar v5 = std::pow(v4, 3.0/2.0);
++const Scalar v6 = z*z*z;
++const Scalar v7 = v5*v6;
++const Scalar v8 = v0 + v3;
++const Scalar v9 = v1*v8;
++const Scalar v10 = 4*v9;
++const Scalar v11 = std::sqrt(v4);
++const Scalar v12 = std::atan(v11);
++const Scalar v13 = v12*v12;
++const Scalar v14 = k6*v13;
++const Scalar v15 = k4 + v13*(k5 + v14);
++const Scalar v16 = k3 + v13*v15;
++const Scalar v17 = k2 + v13*v16;
++const Scalar v18 = k1 + v13*v17;
++const Scalar v19 = v13*v18 + 1;
++const Scalar v20 = v13*(v19*v19);
++const Scalar v21 = p2*v20;
++const Scalar v22 = v21*y;
++const Scalar v23 = 1.0/v11;
++const Scalar v24 = v3*v3*v3;
++const Scalar v25 = 2*v23*v24*v8*1.0/z;
++const Scalar v26 = v13*(v13*(v13*(v13*(k5 + 2*v14) + v15) + v16) + v17) + v18;
++const Scalar v27 = v13*v26;
++const Scalar v28 = 2*v27;
++const Scalar v29 = v19 + v28;
++const Scalar v30 = v24*v29;
++const Scalar v31 = v23*v30;
++const Scalar v32 = 4*z;
++const Scalar v33 = v19*v19*v19;
++const Scalar v34 = v12*v12*v12;
++const Scalar v35 = s2*v33*v34;
++const Scalar v36 = v3*v8;
++const Scalar v37 = v19*y;
++const Scalar v38 = y*z;
++const Scalar v39 = 8*v27;
++const Scalar v40 = v3*v3;
++const Scalar v41 = v12*v19;
++const Scalar v42 = v40*v41;
++const Scalar v43 = v29*v40;
++const Scalar v44 = v23*v43;
++const Scalar v45 = s1*v44;
++const Scalar v46 = v36*v41;
++const Scalar v47 = 3*v46;
++const Scalar v48 = 3*v1 + v2;
++const Scalar v49 = v0*v11;
++const Scalar v50 = v29*v49;
++const Scalar v51 = v41*v8;
++const Scalar v52 = v48*v50 - v48*v51;
++const Scalar v53 = 2*v41;
++const Scalar v54 = v53*x;
++const Scalar v55 = 1.0/v8;
++const Scalar v56 = v55*1.0/v40;
++const Scalar v57 = fx*v56;
++const Scalar v58 = 1.0/v5*1.0/v6;
++const Scalar v59 = 4*x;
++const Scalar v60 = p2*v59;
++const Scalar v61 = v2*v8;
++const Scalar v62 = v20*v61;
++const Scalar v63 = 2*v36;
++const Scalar v64 = v38*x;
++const Scalar v65 = v11*v41*v64;
++const Scalar v66 = v29*v3*v64;
++const Scalar v67 = v19*x;
++const Scalar v68 = 8*v26*v34*v49;
++const Scalar v69 = 4*v35;
++const Scalar v70 = v53*y;
++const Scalar v71 = z*z*z*z*z*z*z*z*z*z*z*z*z*z*z*z*z;
++const Scalar v72 = std::pow(v4, 17.0/2.0);
++const Scalar v73 = v71*v72;
++const Scalar v74 = v28*v73;
++const Scalar v75 = v29*v41*(v3*v3*v3*v3*v3*v3*v3*v3);
++const Scalar v76 = -v0*v5*v51 + v11*v46 + v43;
++const Scalar v77 = v76*(v3*v3*v3*v3*v3*v3*v3);
++const Scalar v78 = v53*v76*(v3*v3*v3*v3*v3*v3);
++const Scalar v79 = v55*1.0/v71*1.0/v72;
++const Scalar v80 = p1*y;
++const Scalar v81 = v20*v80;
++const Scalar v82 = 4*s4*v33*v34;
++const Scalar v83 = s3*v44;
++const Scalar v84 = v1 + 3*v2;
++const Scalar v85 = v50*v84 - v51*v84;
++const Scalar v86 = fy*v56;
++const Scalar v87 = p1*x;
++
++const Scalar du_dx = v57*v58*(v1*v31 - v10*v22*v7 + v22*v25 + v30*v32*v35*x + v42*(p2*v1*v32*v37 + p2*v1*v38*v39 + v36 - v9) + v54*v7*(p1*(v47 + v52) + v45));
++const Scalar du_dy = v57*(p2*v2*v67*v68 + v21*v63*x + v44*v69*y - v60*v62 + v65*(4*p2*v19*y*z - v8) + v66 + v70*(p1*(v46 + v52) + v45));
++const Scalar du_dz = -fx*v79*(v60*v75*y + v67*v73 + v69*v77 + v74*x + v78*(p1*v48 + s1*v3));
++const Scalar dv_dx = v86*(p1*v1*v37*v68 - v10*v81 + v44*v82*x + v54*(p2*(v46 + v85) + v83) + v63*v81 + v65*(4*p1*v19*x*z - v8) + v66);
++const Scalar dv_dy = v58*v86*(-p1*v59*v62*v7 + v2*v31 + v20*v25*v87 + v30*v38*v82 + v42*(p1*v2*v32*v67 + v2*v39*v87*z + v36 - v61) + v7*v70*(p2*(v47 + v85) + v83));
++const Scalar dv_dz = -fy*v79*(v37*v73 + v59*v75*v80 + v74*y + v77*v82 + v78*(p2*v84 + s3*v3));
++
++[Project jacobians of 2D point w.r.t intrinsics]
++const Scalar w0 = x*x;
++const Scalar w1 = y*y;
++const Scalar w2 = w0 + w1;
++const Scalar w3 = std::sqrt(w2*1.0/(z*z));
++const Scalar w4 = w3*z;
++const Scalar w5 = w4*x;
++const Scalar w6 = std::atan(w3);
++const Scalar w7 = w6*w6;
++const Scalar w8 = w7*(k1 + w7*(k2 + w7*(k3 + w7*(k4 + w7*(k5 + k6*w7))))) + 1;
++const Scalar w9 = w6*w6*w6;
++const Scalar w10 = w2*w9*(w8*w8*w8);
++const Scalar w11 = s2*w10;
++const Scalar w12 = 2*x*y;
++const Scalar w13 = 3*w0 + w1;
++const Scalar w14 = w6*w8;
++const Scalar w15 = w14*(p1*w13 + p2*w12 + s1*w2);
++const Scalar w16 = 1.0/w2;
++const Scalar w17 = w14*w16;
++const Scalar w18 = w16*w9;
++const Scalar w19 = fx*(4*w11 + 2*w15 + w5);
++const Scalar w20 = w6*w6*w6*w6*w6;
++const Scalar w21 = w16*w19;
++const Scalar w22 = w6*w6*w6*w6*w6*w6*w6;
++const Scalar w23 = w6*w6*w6*w6*w6*w6*w6*w6*w6;
++const Scalar w24 = w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6;
++const Scalar w25 = w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6*w6;
++const Scalar w26 = w7*(w8*w8);
++const Scalar w27 = fx*w26;
++const Scalar w28 = w16*w27;
++const Scalar w29 = (w6*w6*w6*w6)*(w8*w8*w8*w8);
++const Scalar w30 = w4*y;
++const Scalar w31 = s4*w10;
++const Scalar w32 = w0 + 3*w1;
++const Scalar w33 = w14*(p1*w12 + p2*w32 + s3*w2);
++const Scalar w34 = fy*(w30 + 4*w31 + 2*w33);
++const Scalar w35 = w16*w34;
++const Scalar w36 = fy*w26;
++const Scalar w37 = w16*w36;
++
++const Scalar du_fx = w17*(w11 + w15 + w5);
++const Scalar du_fy = 0;
++const Scalar du_cx = 1;
++const Scalar du_cy = 0;
++const Scalar du_k1 = w18*w19;
++const Scalar du_k2 = w20*w21;
++const Scalar du_k3 = w21*w22;
++const Scalar du_k4 = w21*w23;
++const Scalar du_k5 = w21*w24;
++const Scalar du_k6 = w21*w25;
++const Scalar du_p1 = w13*w28;
++const Scalar du_p2 = w12*w28;
++const Scalar du_s1 = w27;
++const Scalar du_s2 = fx*w29;
++const Scalar du_s3 = 0;
++const Scalar du_s4 = 0;
++const Scalar dv_fx = 0;
++const Scalar dv_fy = w17*(w30 + w31 + w33);
++const Scalar dv_cx = 0;
++const Scalar dv_cy = 1;
++const Scalar dv_k1 = w18*w34;
++const Scalar dv_k2 = w20*w35;
++const Scalar dv_k3 = w22*w35;
++const Scalar dv_k4 = w23*w35;
++const Scalar dv_k5 = w24*w35;
++const Scalar dv_k6 = w25*w35;
++const Scalar dv_p1 = w12*w37;
++const Scalar dv_p2 = w32*w37;
++const Scalar dv_s1 = 0;
++const Scalar dv_s2 = 0;
++const Scalar dv_s3 = w36;
++const Scalar dv_s4 = fy*w29;
++
++[Distort jacobians of distorted 2D point from undistorted 2D point]
++const Scalar v0 = xp*xp;
++const Scalar v1 = yp*yp;
++const Scalar v2 = v0 + v1;
++const Scalar v3 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++const Scalar v4 = std::atan(std::sqrt(v2));
++const Scalar v5 = v4*v4;
++const Scalar v6 = k6*v5;
++const Scalar v7 = k4 + v5*(k5 + v6);
++const Scalar v8 = k3 + v5*v7;
++const Scalar v9 = k2 + v5*v8;
++const Scalar v10 = k1 + v5*v9;
++const Scalar v11 = v10*v5 + 1;
++const Scalar v12 = v2 + 1;
++const Scalar v13 = v12*v4;
++const Scalar v14 = v11*v13;
++const Scalar v15 = v14*v3;
++const Scalar v16 = v0*v11;
++const Scalar v17 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++const Scalar v18 = v13*v17;
++const Scalar v19 = std::pow(v2, 33.0/2.0);
++const Scalar v20 = 2*yp;
++const Scalar v21 = v12*v5*(v11*v11);
++const Scalar v22 = p2*v21;
++const Scalar v23 = std::pow(v2, 31.0/2.0);
++const Scalar v24 = 4*yp;
++const Scalar v25 = v23*v24;
++const Scalar v26 = v5*(v10 + v5*(v5*(v5*(v5*(k5 + 2*v6) + v7) + v8) + v9));
++const Scalar v27 = 2*v26;
++const Scalar v28 = v11 + v27;
++const Scalar v29 = v19*v28;
++const Scalar v30 = v17*v28;
++const Scalar v31 = p2*v4;
++const Scalar v32 = 4*xp;
++const Scalar v33 = v1*v11;
++const Scalar v34 = v1*v27 + v33;
++const Scalar v35 = v0*v27 + v16;
++const Scalar v36 = v34 + v35;
++const Scalar v37 = v11*v11*v11;
++const Scalar v38 = v4*v4*v4;
++const Scalar v39 = s2*v36*v37*v38;
++const Scalar v40 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++const Scalar v41 = v2*v2*v2;
++const Scalar v42 = v36*v41;
++const Scalar v43 = s1*v42;
++const Scalar v44 = v14*std::pow(v2, 7.0/2.0);
++const Scalar v45 = 3*v44;
++const Scalar v46 = 3*v0;
++const Scalar v47 = 6*v26;
++const Scalar v48 = v14*std::pow(v2, 5.0/2.0);
++const Scalar v49 = v41*(v0*v47 + v11*v46 + v34) - v48*(v1 + v46);
++const Scalar v50 = 2*xp;
++const Scalar v51 = v11*v4;
++const Scalar v52 = v50*v51;
++const Scalar v53 = 1.0/v12;
++const Scalar v54 = v53/std::pow(v2, 35.0/2.0);
++const Scalar v55 = std::pow(v2, 25.0/2.0);
++const Scalar v56 = v20*v51;
++const Scalar v57 = v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2*v2;
++const Scalar v58 = v23*v32;
++const Scalar v59 = xp*yp;
++const Scalar v60 = -v14*v23*v59 + v30*v59;
++const Scalar v61 = v53*1.0/v3;
++const Scalar v62 = s3*v42;
++const Scalar v63 = v41*(v1*v47 + 3*v33 + v35) - v48*(v0 + 3*v1);
++const Scalar v64 = p1*v21;
++const Scalar v65 = s4*v36*v37*v38;
++const Scalar v66 = p1*v4;
++
++const Scalar dxpp_dxp = v54*(-v0*v22*v25 + v0*v29 + v15 - v16*v18 + v16*v24*v30*v31 + v17*v32*v39 + v19*v20*v22 + v40*v52*(p1*(v45 + v49) + v43));
++const Scalar dxpp_dyp = v61*(-v1*v22*v32*v57 + v17*v22*v50 + v25*v39 + v28*v31*v33*v58 + v55*v56*(p1*(v44 + v49) + v43) + v60);
++const Scalar dypp_dxp = v61*(-v0*v24*v57*v64 + v16*v25*v28*v66 + v17*v20*v64 + v52*v55*(p2*(v44 + v63) + v62) + v58*v65 + v60);
++const Scalar dypp_dyp = v54*(v1*v29 - v1*v58*v64 + v15 + v17*v24*v65 - v18*v33 + v19*v50*v64 + v30*v32*v33*v66 + v40*v56*(p2*(v45 + v63) + v62));
++
++[Unproject jacobians of 3D point w.r.t 2D point]
++Not implemented yet
++[Unproject jacobians of 3D point w.r.t intrinsics]
++Not implemented yet
++'''
+\ No newline at end of file
+diff --git a/test/src/benchmark_camera.cpp b/test/src/benchmark_camera.cpp
+index 643ff73..d2bc320 100644
+--- a/test/src/benchmark_camera.cpp
++++ b/test/src/benchmark_camera.cpp
+@@ -123,6 +123,7 @@ void bmUnprojectJacobians(benchmark::State &state) {
+ 
+ BENCHMARK_TEMPLATE(bmProject, basalt::PinholeCamera<double>);
+ BENCHMARK_TEMPLATE(bmProject, basalt::PinholeRadtan8Camera<double>);
++BENCHMARK_TEMPLATE(bmProject, basalt::Fisheye624Camera<double>);
+ BENCHMARK_TEMPLATE(bmProject, basalt::ExtendedUnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmProject, basalt::UnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmProject, basalt::KannalaBrandtCamera4<double>);
+@@ -131,6 +132,7 @@ BENCHMARK_TEMPLATE(bmProject, basalt::FovCamera<double>);
+ 
+ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::PinholeCamera<double>);
+ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::PinholeRadtan8Camera<double>);
++BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::Fisheye624Camera<double>);
+ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::ExtendedUnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::UnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::KannalaBrandtCamera4<double>);
+@@ -139,6 +141,7 @@ BENCHMARK_TEMPLATE(bmProjectJacobians, basalt::FovCamera<double>);
+ 
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::PinholeCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::PinholeRadtan8Camera<double>);
++BENCHMARK_TEMPLATE(bmUnproject, basalt::Fisheye624Camera<double>);
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::ExtendedUnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::UnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::KannalaBrandtCamera4<double>);
+@@ -146,7 +149,8 @@ BENCHMARK_TEMPLATE(bmUnproject, basalt::DoubleSphereCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnproject, basalt::FovCamera<double>);
+ 
+ BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::PinholeCamera<double>);
+-// BENCHMARK_TEMPL(bmUnprojectJacobians, basalt::PinholeRadtan8Camera<double>);
++// BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::PinholeRadtan8Camera<double>);
++// BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::Fisheye624Camera<double>);
+ BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::ExtendedUnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::UnifiedCamera<double>);
+ BENCHMARK_TEMPLATE(bmUnprojectJacobians, basalt::KannalaBrandtCamera4<double>);
+diff --git a/test/src/test_camera.cpp b/test/src/test_camera.cpp
+index 01e9af4..742b626 100644
+--- a/test/src/test_camera.cpp
++++ b/test/src/test_camera.cpp
+@@ -308,6 +308,9 @@ TEST(CameraTestCase, PinholeRadtan8ProjectJacobiansFloat) {
+   testProjectJacobian<basalt::PinholeRadtan8Camera<float>>();
+ }
+ 
++TEST(CameraTestCase, Fisheye624ProjectJacobians) { testProjectJacobian<basalt::Fisheye624Camera<double>>(); }
++TEST(CameraTestCase, Fisheye624ProjectJacobiansFloat) { testProjectJacobian<basalt::Fisheye624Camera<float>>(); }
++
+ TEST(CameraTestCase, UnifiedProjectJacobians) { testProjectJacobian<basalt::UnifiedCamera<double>>(); }
+ TEST(CameraTestCase, UnifiedProjectJacobiansFloat) { testProjectJacobian<basalt::UnifiedCamera<float>>(); }
+ 
+@@ -336,6 +339,9 @@ TEST(CameraTestCase, PinholeRadtan8ProjectUnprojectFloat) {
+   testProjectUnproject<basalt::PinholeRadtan8Camera<float>>();
+ }
+ 
++TEST(CameraTestCase, Fisheye624ProjectUnproject) { testProjectUnproject<basalt::Fisheye624Camera<double>>(); }
++TEST(CameraTestCase, Fisheye624ProjectUnprojectFloat) { testProjectUnproject<basalt::Fisheye624Camera<float>>(); }
++
+ TEST(CameraTestCase, UnifiedProjectUnproject) { testProjectUnproject<basalt::UnifiedCamera<double>>(); }
+ TEST(CameraTestCase, UnifiedProjectUnprojectFloat) { testProjectUnproject<basalt::UnifiedCamera<float>>(); }
+ 
+@@ -372,6 +378,13 @@ TEST(CameraTestCase, PinholeUnprojectJacobiansFloat) { testUnprojectJacobians<ba
+ //   testUnprojectJacobians<basalt::PinholeRadtan8Camera<float>>();
+ // }
+ 
++// TEST(CameraTestCase, Fisheye624UnprojectJacobians) {
++//   testUnprojectJacobians<basalt::Fisheye624Camera<double>>();
++// }
++// TEST(CameraTestCase, Fisheye624UnprojectJacobiansFloat) {
++//   testUnprojectJacobians<basalt::Fisheye624Camera<float>>();
++// }
++
+ TEST(CameraTestCase, UnifiedUnprojectJacobians) { testUnprojectJacobians<basalt::UnifiedCamera<double>>(); }
+ TEST(CameraTestCase, UnifiedUnprojectJacobiansFloat) { testUnprojectJacobians<basalt::UnifiedCamera<float>>(); }
+ 
+@@ -407,6 +420,11 @@ TEST(CameraTestCase, PinholeRadtan8ProjectJacobiansFloat3) {
+   testProjectJacobian3<basalt::PinholeRadtan8Camera<float>>();
+ }
+ 
++TEST(CameraTestCase, Fisheye624ProjectJacobians3) { testProjectJacobian3<basalt::Fisheye624Camera<double>>(); }
++TEST(CameraTestCase, Fisheye624ProjectJacobiansFloat3) {
++  testProjectJacobian3<basalt::Fisheye624Camera<float>>();
++}
++
+ TEST(CameraTestCase, UnifiedProjectJacobians3) { testProjectJacobian3<basalt::UnifiedCamera<double>>(); }
+ TEST(CameraTestCase, UnifiedProjectJacobiansFloat3) { testProjectJacobian3<basalt::UnifiedCamera<float>>(); }
+ 
+@@ -441,6 +459,13 @@ TEST(CameraTestCase, PinholeUnprojectJacobiansFloat3) { testUnprojectJacobians3<
+ //   testUnprojectJacobians3<basalt::PinholeRadtan8Camera<float>>();
+ // }
+ 
++// TEST(CameraTestCase, Fisheye624UnprojectJacobians3) {
++//   testUnprojectJacobians3<basalt::Fisheye624Camera<double>>();
++// }
++// TEST(CameraTestCase, Fisheye624UnprojectJacobiansFloat3) {
++//   testUnprojectJacobians3<basalt::Fisheye624Camera<float>>();
++// }
++
+ TEST(CameraTestCase, UnifiedUnprojectJacobians3) { testUnprojectJacobians3<basalt::UnifiedCamera<double>>(); }
+ TEST(CameraTestCase, UnifiedUnprojectJacobiansFloat3) { testUnprojectJacobians3<basalt::UnifiedCamera<float>>(); }
+ 
+-- 
+2.34.1
+
