@@ -1,33 +1,43 @@
 # xreal-vio-vr
 
-🌀 **A lightweight Linux spatial computing stack for the XREAL Ultra**  
-✴ *Early-stage project — experimental and evolving daily*
+A lightweight Linux spatial computing stack for the XREAL Ultra
 
-**Built by @deskunreal**
+## Purpose
 
-Goal: Power your headset with stereo SLAM, Joy-Con input, Hand Tracking, and a minimalist 3D desktop — no Unity, no Unreal, no bloat.
+This repository is aimed at creating a reproducible, modular pipeline for using the XREAL Air 2 Ultra on Linux.  
+It serves both as a reference implementation and a quick-start integration method for combining:
 
----
+- Stereo SLAM via Basalt
+- Pose injection into Monado (OpenXR)
+- Controller and hand input
+- Linux-native 3D desktop overlays
 
-## ⚠️ Status: Under Heavy Construction
+## Description
 
-This is a **work-in-progress** project. Expect:
+A modular setup to enable stereo SLAM, IMU tracking, controller input, and 3D workspace rendering with the XREAL Air 2 Ultra headset on Linux.
 
-- Bugs 🐛  
-- Missing scripts  
-- Sudden architecture changes  
-- TODOs all over the place
+## Stack Components
 
-👀 Curious devs welcome — but this is not plug-and-play (yet).  
-Got questions? Start a discussion or submit an issue — feedback shapes the stack.
+- Camera + IMU access via UVC and USB serial
+- VIO backend using patched Basalt with fisheye624 model
+- Pose injection layer through Monado (OpenXR runtime)
+- Joy-Con input via evdev or user-space driver
+- Optional hand tracking pipeline (future module)
+- wlroots-based compositor overlay (wlx-overlay-s)
 
----
+## Dependencies
 
-## 💡 Vision
+- `basalt` (VIO)
+- `basalt-headers` (camera models)
+- `wlx-overlay-s` (Wayland overlay compositor)
+- `monado` (OpenXR runtime)
+- `udev` and `libusb` for device interfaces
+- `libcamera` or raw video stream handler
 
-- 📷 SLAM from XREAL Ultra's stereo camera + IMU  
-- 🎮 Joy-Con input instead of complex hand tracking  
-- 🪟 Floating Linux desktops in VR  
-- 🎯 SteamVR-compatible pose injection  
-- 🧠 Designed for wearable PCs and eventual full spatial shell
+## Build Notes
 
+This stack is not plug-and-play. Yet.
+
+## Contributing
+
+Contributions are welcome. Keep patches modular and comments minimal.
