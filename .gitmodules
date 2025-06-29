@@ -13,3 +13,9 @@
 [submodule "xr/xrdesktop"]
 	path = xr/xrdesktop
 	url = https://gitlab.freedesktop.org/xrdesktop/xrdesktop.git
+[submodule "slam/basalt"]
+	path = slam/basalt
+	url = https://gitlab.freedesktop.org/mateosss/basalt.git
+[submodule "xr/wlx-overlay-s"]
+	path = xr/wlx-overlay-s
+	url = https://github.com/galister/wlx-overlay-s
