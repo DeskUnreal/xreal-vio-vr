@@ -21,7 +21,6 @@ A modular setup to enable stereo SLAM, IMU tracking, controller input, and 3D wo
 - Camera + IMU access via UVC and USB serial
 - VIO backend using patched Basalt with fisheye624 model
 - Pose injection layer through Monado (OpenXR runtime)
-- Joy-Con input via evdev or user-space driver
 - Optional hand tracking pipeline (future module)
 - wlroots-based compositor overlay (wlx-overlay-s)
 
@@ -32,7 +31,6 @@ A modular setup to enable stereo SLAM, IMU tracking, controller input, and 3D wo
 - `wlx-overlay-s` (Wayland overlay compositor)
 - `monado` (OpenXR runtime)
 - `udev` and `libusb` for device interfaces
-- `libcamera` or raw video stream handler
 
 ## Build Notes
 
@@ -40,4 +38,4 @@ This stack is not plug-and-play. Yet.
 
 ## Contributing
 
-Contributions are welcome. Keep patches modular and comments minimal.
+Contributions are welcome.

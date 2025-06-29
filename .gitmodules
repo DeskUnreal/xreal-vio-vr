@@ -1,6 +1,3 @@
-[submodule "slam/orbslam3"]
-	path = slam/orbslam3
-	url = https://github.com/UZ-SLAMLab/ORB_SLAM3.git
 [submodule "libs/DBoW3"]
 	path = libs/DBoW3
 	url = https://github.com/rmsalinas/DBoW3.git
@@ -10,9 +7,6 @@
 [submodule "drivers/nrealAirLinuxDriver"]
 	path = drivers/nrealAirLinuxDriver
 	url = https://gitlab.com/TheJackiMonster/nrealAirLinuxDriver.git
-[submodule "xr/xrdesktop"]
-	path = xr/xrdesktop
-	url = https://gitlab.freedesktop.org/xrdesktop/xrdesktop.git
 [submodule "slam/basalt"]
 	path = slam/basalt
 	url = https://gitlab.freedesktop.org/mateosss/basalt.git
